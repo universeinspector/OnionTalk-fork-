@@ -1,2 +1,2 @@
 # OnionTalk
-Secure talk sessions over the Tor Network
+Secure talk sessions over the Tor Network.
