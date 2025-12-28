@@ -258,143 +258,187 @@ func startEncryptedCommunication(conn net.Conn, sharedSecret []byte, isServer bo
 }
 
 func receiveMessages(conn net.Conn, gcm cipher.AEAD, wg *sync.WaitGroup, isServer bool) {
-    defer wg.Done()
-    buf := make([]byte, 4096)
-    firstMessage := true
-    
-    for {
-        n, err := conn.Read(buf)
-        if err != nil {
-            if isServer {
-                fmt.Printf("Error reading message: %v\n", err)
-            } else {
-                fmt.Println("Error reading message:", err)
-            }
-            return
-        }
+	defer wg.Done()
+	firstMessage := true
 
-        decrypted, err := gcm.Open(nil, buf[:12], buf[12:n], nil)
-        if err != nil {
-            if isServer {
-                fmt.Printf("Error decrypting message: %v\n", err)
-            } else {
-                fmt.Println("Error decrypting message:", err)
-            }
-            return
-        }
+	for {
+		payload, err := readFrame(conn)
+		if err != nil {
+			if isServer {
+				fmt.Printf("Error reading frame: %v\n", err)
+			} else {
+				fmt.Println("Error reading frame:", err)
+			}
+			return
+		}
 
-        if string(decrypted) == ".QUIT" {
-            if isServer {
-                clientMutex.Lock()
-                clientConnected = false
-                clientMutex.Unlock()
-            }
-            os.Exit(0)
-        }
+		// payload = [nonce(12)][ciphertext...]
+		if len(payload) < nonceSize {
+			if isServer {
+				fmt.Printf("Invalid frame (too short): %d\n", len(payload))
+			} else {
+				fmt.Println("Invalid frame (too short):", len(payload))
+			}
+			return
+		}
 
-        // Leerzeile vor empfangenen Nachrichten (außer vor der ersten)
-        if !firstMessage {
-            fmt.Println()  // Leerzeile einfügen
-        } else {
-            firstMessage = false
-        }
-        
-        fmt.Println(string(decrypted))
-    }
+		nonce := payload[:nonceSize]
+		ciphertext := payload[nonceSize:]
+
+		decrypted, err := gcm.Open(nil, nonce, ciphertext, nil)
+		if err != nil {
+			if isServer {
+				fmt.Printf("Error decrypting message: %v\n", err)
+			} else {
+				fmt.Println("Error decrypting message:", err)
+			}
+			return
+		}
+
+		if string(decrypted) == ".QUIT" {
+			if isServer {
+				clientMutex.Lock()
+				clientConnected = false
+				clientMutex.Unlock()
+			}
+			os.Exit(0)
+		}
+
+		// Leerzeile vor empfangenen Nachrichten (außer vor der ersten)
+		if !firstMessage {
+			fmt.Println()
+		} else {
+			firstMessage = false
+		}
+
+		fmt.Println(string(decrypted))
+	}
 }
 
 func sendMessages(conn net.Conn, gcm cipher.AEAD, wg *sync.WaitGroup, isServer bool) {
-    defer wg.Done()
-    reader := bufio.NewReader(os.Stdin)
+	defer wg.Done()
+	reader := bufio.NewReader(os.Stdin)
 
-    c := make(chan os.Signal, 1)
-    signal.Notify(c, os.Interrupt)
-    go func() {
-        <-c
-        nonce := make([]byte, 12)
-        io.ReadFull(rand.Reader, nonce)
-        encrypted := gcm.Seal(nil, nonce, []byte(".QUIT"), nil)
-        conn.Write(append(nonce, encrypted...))
-        if isServer {
-            clientMutex.Lock()
-            clientConnected = false
-            clientMutex.Unlock()
-        }
-        os.Exit(0)
-    }()
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, os.Interrupt)
 
-    for {
-        // No prompt in normal mode - clean for copy/paste
-        input, err := reader.ReadString('\n')
-        if err != nil {
-            if err == io.EOF {
-                // Ctrl+D pressed
-                nonce := make([]byte, 12)
-                io.ReadFull(rand.Reader, nonce)
-                encrypted := gcm.Seal(nil, nonce, []byte(".QUIT"), nil)
-                conn.Write(append(nonce, encrypted...))
-                os.Exit(0)
-            }
-            continue
-        }
+	// Ctrl+C handler
+	go func() {
+		<-c
+		nonce := make([]byte, nonceSize)
+		_, _ = io.ReadFull(rand.Reader, nonce)
+		encrypted := gcm.Seal(nil, nonce, []byte(".QUIT"), nil)
 
-        input = strings.TrimSpace(input)
+		payload := append(nonce, encrypted...)
+		_ = writeFrame(conn, payload)
 
-        if input == ".QUIT" {
-            nonce := make([]byte, 12)
-            io.ReadFull(rand.Reader, nonce)
-            encrypted := gcm.Seal(nil, nonce, []byte(".QUIT"), nil)
-            conn.Write(append(nonce, encrypted...))
-            if isServer {
-                clientMutex.Lock()
-                clientConnected = false
-                clientMutex.Unlock()
-            }
-            os.Exit(0)
-        }
+		if isServer {
+			clientMutex.Lock()
+			clientConnected = false
+			clientMutex.Unlock()
+		}
+		os.Exit(0)
+	}()
 
-        if input == ".MULTI" {
-            // Multi-line mode - no prompts for clean copy/paste
-            var lines []string
+	for {
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				// Ctrl+D pressed
+				nonce := make([]byte, nonceSize)
+				_, _ = io.ReadFull(rand.Reader, nonce)
+				encrypted := gcm.Seal(nil, nonce, []byte(".QUIT"), nil)
 
-            for {
-                line, err := reader.ReadString('\n')
-                if err != nil {
-                    break
-                }
-                line = strings.TrimSpace(line)
+				payload := append(nonce, encrypted...)
+				_ = writeFrame(conn, payload)
 
-                if line == ".END" {
-                    break
-                }
+				os.Exit(0)
+			}
+			continue
+		}
 
-                if line == ".QUIT" {
-                    nonce := make([]byte, 12)
-                    io.ReadFull(rand.Reader, nonce)
-                    encrypted := gcm.Seal(nil, nonce, []byte(".QUIT"), nil)
-                    conn.Write(append(nonce, encrypted...))
-                    os.Exit(0)
-                }
+		input = strings.TrimSpace(input)
 
-                lines = append(lines, line)
-            }
+		if input == ".QUIT" {
+			nonce := make([]byte, nonceSize)
+			_, _ = io.ReadFull(rand.Reader, nonce)
+			encrypted := gcm.Seal(nil, nonce, []byte(".QUIT"), nil)
 
-            if len(lines) > 0 {
-                message := strings.Join(lines, "\n")
-                nonce := make([]byte, 12)
-                io.ReadFull(rand.Reader, nonce)
-                encrypted := gcm.Seal(nil, nonce, []byte(message), nil)
-                conn.Write(append(nonce, encrypted...))
-            }
-            continue
-        }
+			payload := append(nonce, encrypted...)
+			_ = writeFrame(conn, payload)
 
-        // Send single line message
-        if input != "" {
-            nonce := make([]byte, 12)
-            io.ReadFull(rand.Reader, nonce)
-            encrypted := gcm.Seal(nil, nonce, []byte(input), nil)
-            conn.Write(append(nonce, encrypted...))
-        }
-    }
+			if isServer {
+				clientMutex.Lock()
+				clientConnected = false
+				clientMutex.Unlock()
+			}
+			os.Exit(0)
+		}
+
+		if input == ".MULTI" {
+			var lines []string
+
+			for {
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					break
+				}
+				line = strings.TrimSpace(line)
+
+				if line == ".END" {
+					break
+				}
+
+				if line == ".QUIT" {
+					nonce := make([]byte, nonceSize)
+					_, _ = io.ReadFull(rand.Reader, nonce)
+					encrypted := gcm.Seal(nil, nonce, []byte(".QUIT"), nil)
+
+					payload := append(nonce, encrypted...)
+					_ = writeFrame(conn, payload)
+
+					os.Exit(0)
+				}
+
+				lines = append(lines, line)
+			}
+
+			if len(lines) > 0 {
+				message := strings.Join(lines, "\n")
+
+				nonce := make([]byte, nonceSize)
+				_, _ = io.ReadFull(rand.Reader, nonce)
+				encrypted := gcm.Seal(nil, nonce, []byte(message), nil)
+
+				payload := append(nonce, encrypted...)
+				if err := writeFrame(conn, payload); err != nil {
+					if isServer {
+						fmt.Printf("Error writing frame: %v\n", err)
+					} else {
+						fmt.Println("Error writing frame:", err)
+					}
+					return
+				}
+			}
+			continue
+		}
+
+		// Send single line message
+		if input != "" {
+			nonce := make([]byte, nonceSize)
+			_, _ = io.ReadFull(rand.Reader, nonce)
+			encrypted := gcm.Seal(nil, nonce, []byte(input), nil)
+
+			payload := append(nonce, encrypted...)
+			if err := writeFrame(conn, payload); err != nil {
+				if isServer {
+					fmt.Printf("Error writing frame: %v\n", err)
+				} else {
+					fmt.Println("Error writing frame:", err)
+				}
+				return
+			}
+		}
+	}
 }
+
