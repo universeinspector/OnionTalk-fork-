@@ -314,6 +314,21 @@ func receiveMessages(conn net.Conn, gcm cipher.AEAD, wg *sync.WaitGroup, isServe
 		fmt.Println(string(decrypted))
 	}
 }
+// Helper function
+func sendEncrypted(conn net.Conn, gcm cipher.AEAD, msg string) error {
+	nonce := make([]byte, nonceSize)
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return fmt.Errorf("nonce: %w", err)
+	}
+
+	ciphertext := gcm.Seal(nil, nonce, []byte(msg), nil)
+	payload := append(nonce, ciphertext...)
+
+	if err := writeFrame(conn, payload); err != nil {
+		return fmt.Errorf("writeFrame: %w", err)
+	}
+	return nil
+}
 
 func sendMessages(conn net.Conn, gcm cipher.AEAD, wg *sync.WaitGroup, isServer bool) {
 	defer wg.Done()
@@ -441,4 +456,5 @@ func sendMessages(conn net.Conn, gcm cipher.AEAD, wg *sync.WaitGroup, isServer b
 		}
 	}
 }
+
 
