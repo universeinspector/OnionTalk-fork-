@@ -228,22 +228,62 @@ func startEncryptedCommunication(conn net.Conn, sharedSecret []byte, isServer bo
 	sharedSecretBuffer := memguard.NewBufferFromBytes(sharedSecret)
 	defer sharedSecretBuffer.Destroy()
 
-	block, err := aes.NewCipher(sharedSecret)
+	c2s, s2c, err := deriveDirectionalKeys(sharedSecret)
 	if err != nil {
 		if isServer {
-			log.Printf("Error initializing AES cipher: %v", err)
+			log.Printf("Error deriving keys: %v", err)
 		} else {
-			fmt.Println("Error initializing AES cipher:", err)
+			fmt.Println("Error deriving keys:", err)
 		}
 		return
 	}
 
-	gcm, err := cipher.NewGCM(block)
+	// Key-Separation: je nach Rolle send/recv unterschiedlich
+	var sendKey, recvKey []byte
+	if isServer {
+		recvKey = c2s
+		sendKey = s2c
+	} else {
+		sendKey = c2s
+		recvKey = s2c
+	}
+
+	sendBlock, err := aes.NewCipher(sendKey)
 	if err != nil {
 		if isServer {
-			log.Printf("Error initializing GCM mode: %v", err)
+			log.Printf("Error initializing AES (send): %v", err)
 		} else {
-			fmt.Println("Error initializing GCM mode:", err)
+			fmt.Println("Error initializing AES (send):", err)
+		}
+		return
+	}
+
+	recvBlock, err := aes.NewCipher(recvKey)
+	if err != nil {
+		if isServer {
+			log.Printf("Error initializing AES (recv): %v", err)
+		} else {
+			fmt.Println("Error initializing AES (recv):", err)
+		}
+		return
+	}
+
+	gcmSend, err := cipher.NewGCM(sendBlock)
+	if err != nil {
+		if isServer {
+			log.Printf("Error initializing GCM (send): %v", err)
+		} else {
+			fmt.Println("Error initializing GCM (send):", err)
+		}
+		return
+	}
+
+	gcmRecv, err := cipher.NewGCM(recvBlock)
+	if err != nil {
+		if isServer {
+			log.Printf("Error initializing GCM (recv): %v", err)
+		} else {
+			fmt.Println("Error initializing GCM (recv):", err)
 		}
 		return
 	}
@@ -251,10 +291,11 @@ func startEncryptedCommunication(conn net.Conn, sharedSecret []byte, isServer bo
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	go receiveMessages(conn, gcm, &wg, isServer)
-	go sendMessages(conn, gcm, &wg, isServer)
+	go receiveMessages(conn, gcmRecv, &wg, isServer)
+	go sendMessages(conn, gcmSend, &wg, isServer)
 
 	wg.Wait()
+
 }
 
 func receiveMessages(conn net.Conn, gcm cipher.AEAD, wg *sync.WaitGroup, isServer bool) {
