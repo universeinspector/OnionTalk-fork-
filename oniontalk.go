@@ -90,7 +90,12 @@ func runServer() {
 	if err != nil {
 		log.Fatalf("Error starting the server: %v", err)
 	}
-	defer listener.Close()
+	defer func() {
+		if err := listener.Close(); err != nil {
+			log.Printf("Error closing listener: %v", err)
+		}
+	}()
+
 	fmt.Printf("Listening...\n")
 
 	for {
