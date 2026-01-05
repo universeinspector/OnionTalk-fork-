@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdh"
@@ -308,38 +309,61 @@ func startEncryptedCommunication(conn net.Conn, sharedSecret []byte, isServer bo
 		return
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	go receiveMessages(conn, gcmRecv, &wg, isServer)
-	go sendMessages(conn, gcmSend, &wg, isServer)
+	go receiveMessages(ctx, cancel, conn, gcmRecv, &wg, isServer)
+	go sendMessages(ctx, cancel, conn, gcmSend, &wg, isServer)
 
 	wg.Wait()
 
+	// Best-effort close (unblocks any remaining reads/writes)
+	_ = conn.Close()
+
 }
 
-func receiveMessages(conn net.Conn, gcm cipher.AEAD, wg *sync.WaitGroup, isServer bool) {
+func receiveMessages(ctx context.Context, cancel context.CancelFunc, conn net.Conn, gcm cipher.AEAD, wg *sync.WaitGroup, isServer bool) {
 	defer wg.Done()
+
 	firstMessage := true
 
 	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		payload, err := readFrame(conn)
 		if err != nil {
+			// Wenn Shutdown läuft, ist das erwartbar
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
 			if isServer {
 				fmt.Printf("Error reading frame: %v\n", err)
 			} else {
 				fmt.Println("Error reading frame:", err)
 			}
+			cancel()
+			_ = conn.Close()
 			return
 		}
 
-		// payload = [nonce(12)][ciphertext...]
 		if len(payload) < nonceSize {
 			if isServer {
 				fmt.Printf("Invalid frame (too short): %d\n", len(payload))
 			} else {
 				fmt.Println("Invalid frame (too short):", len(payload))
 			}
+			cancel()
+			_ = conn.Close()
 			return
 		}
 
@@ -353,6 +377,8 @@ func receiveMessages(conn net.Conn, gcm cipher.AEAD, wg *sync.WaitGroup, isServe
 			} else {
 				fmt.Println("Error decrypting message:", err)
 			}
+			cancel()
+			_ = conn.Close()
 			return
 		}
 
@@ -362,10 +388,11 @@ func receiveMessages(conn net.Conn, gcm cipher.AEAD, wg *sync.WaitGroup, isServe
 				clientConnected = false
 				clientMutex.Unlock()
 			}
-			os.Exit(0)
+			cancel()
+			_ = conn.Close()
+			return
 		}
 
-		// Leerzeile vor empfangenen Nachrichten (außer vor der ersten)
 		if !firstMessage {
 			fmt.Println()
 		} else {
@@ -392,7 +419,7 @@ func sendEncrypted(conn net.Conn, gcm cipher.AEAD, msg string) error {
 	return nil
 }
 
-func sendMessages(conn net.Conn, gcm cipher.AEAD, wg *sync.WaitGroup, isServer bool) {
+func sendMessages(ctx context.Context, cancel context.CancelFunc, conn net.Conn, gcm cipher.AEAD, wg *sync.WaitGroup, isServer bool) {
 	defer wg.Done()
 	reader := bufio.NewReader(os.Stdin)
 
@@ -410,16 +437,27 @@ func sendMessages(conn net.Conn, gcm cipher.AEAD, wg *sync.WaitGroup, isServer b
 			clientConnected = false
 			clientMutex.Unlock()
 		}
-		os.Exit(0)
+
+		cancel()
+		_ = conn.Close()
 	}()
 
 	for {
+		// Stop if someone canceled the session
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		input, err := reader.ReadString('\n')
 		if err != nil {
 			if err == io.EOF {
 				// Ctrl+D pressed
 				_ = sendEncrypted(conn, gcm, ".QUIT")
-				os.Exit(0)
+				cancel()
+				_ = conn.Close()
+				return
 			}
 			continue
 		}
@@ -438,19 +476,30 @@ func sendMessages(conn net.Conn, gcm cipher.AEAD, wg *sync.WaitGroup, isServer b
 				clientConnected = false
 				clientMutex.Unlock()
 			}
-			os.Exit(0)
+
+			cancel()
+			_ = conn.Close()
+			return
 		}
 
 		if input == ".MULTI" {
 			var lines []string
 
 			for {
+				// Respect cancellation while in multi mode too
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+
 				line, err := reader.ReadString('\n')
 				if err != nil {
-					// EOF in multi-mode -> quit
 					if err == io.EOF {
 						_ = sendEncrypted(conn, gcm, ".QUIT")
-						os.Exit(0)
+						cancel()
+						_ = conn.Close()
+						return
 					}
 					break
 				}
@@ -463,7 +512,9 @@ func sendMessages(conn net.Conn, gcm cipher.AEAD, wg *sync.WaitGroup, isServer b
 
 				if line == ".QUIT" {
 					_ = sendEncrypted(conn, gcm, ".QUIT")
-					os.Exit(0)
+					cancel()
+					_ = conn.Close()
+					return
 				}
 
 				lines = append(lines, line)
@@ -477,6 +528,8 @@ func sendMessages(conn net.Conn, gcm cipher.AEAD, wg *sync.WaitGroup, isServer b
 					} else {
 						fmt.Println("Error sending message:", err)
 					}
+					cancel()
+					_ = conn.Close()
 					return
 				}
 			}
@@ -490,6 +543,8 @@ func sendMessages(conn net.Conn, gcm cipher.AEAD, wg *sync.WaitGroup, isServer b
 			} else {
 				fmt.Println("Error sending message:", err)
 			}
+			cancel()
+			_ = conn.Close()
 			return
 		}
 	}
