@@ -135,8 +135,17 @@ func runClient(serverURL string) {
 		os.Exit(1)
 	}
 
-	torProxyUrl, _ := url.Parse(torProxy)
-	dialer, _ := proxy.FromURL(torProxyUrl, proxy.Direct)
+	torProxyUrl, err := url.Parse(torProxy)
+	if err != nil {
+		fmt.Println("Invalid Tor proxy URL:", err)
+		return
+	}
+
+	dialer, err := proxy.FromURL(torProxyUrl, proxy.Direct)
+	if err != nil {
+		fmt.Println("Error creating proxy dialer:", err)
+		return
+	}
 
 	conn, err := dialer.Dial("tcp", serverURL)
 	if err != nil {
@@ -390,6 +399,7 @@ func sendMessages(conn net.Conn, gcm cipher.AEAD, wg *sync.WaitGroup, isServer b
 	// Ctrl+C handler
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
+	defer signal.Stop(c)
 
 	go func() {
 		<-c
