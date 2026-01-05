@@ -121,8 +121,8 @@ func runServer() {
 }
 
 func handleBusyConnection(conn net.Conn) {
-	conn.Write([]byte("Line Busy\n"))
-	conn.Close()
+	_, _ = conn.Write([]byte("Line Busy\n"))
+	_ = conn.Close()
 }
 
 func runClient(serverURL string) {
@@ -143,7 +143,7 @@ func runClient(serverURL string) {
 		fmt.Println("Error connecting to the server:", err)
 		return
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	fmt.Println("Connected to the server.")
 	performKeyExchange(conn, false)
@@ -151,7 +151,7 @@ func runClient(serverURL string) {
 
 func handleConnection(conn net.Conn) {
 	defer func() {
-		conn.Close()
+		_ = conn.Close()
 		clientMutex.Lock()
 		clientConnected = false
 		clientMutex.Unlock()
@@ -191,7 +191,10 @@ func performKeyExchange(conn net.Conn, isServer bool) {
 
 		// Send server's public key
 		publicKeyBytes := publicKey.Bytes()
-		conn.Write(publicKeyBytes)
+		if _, err := conn.Write(publicKeyBytes); err != nil {
+			log.Printf("Error sending public key: %v", err)
+			return
+		}
 
 		sharedSecret, err := privateKey.ECDH(clientPublicKey)
 		if err != nil {
@@ -203,7 +206,10 @@ func performKeyExchange(conn net.Conn, isServer bool) {
 	} else {
 		// Client sends its public key first
 		publicKeyBytes := publicKey.Bytes()
-		conn.Write(publicKeyBytes)
+		if _, err := conn.Write(publicKeyBytes); err != nil {
+			fmt.Println("Error sending client's public key:", err)
+			return
+		}
 
 		// Receive server's public key
 		serverPublicKeyBytes := make([]byte, 32)
